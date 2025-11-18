@@ -53,12 +53,48 @@ pub struct Hit {
 /// Filters applied during hit testing and rectangle intersection.
 ///
 /// Used by [`Tree::hit_test_point`] and [`Tree::intersect_rect`].
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct QueryFilter {
-    /// If true, only consider nodes marked [`NodeFlags::VISIBLE`].
-    pub visible_only: bool,
-    /// If true, only consider nodes marked [`NodeFlags::PICKABLE`] (hit-test).
-    pub pickable_only: bool,
+    /// Bitfield of required node flags. Only nodes containing all these flags will be included.
+    pub required_flags: NodeFlags,
+}
+
+impl Default for QueryFilter {
+    fn default() -> Self {
+        Self {
+            required_flags: NodeFlags::empty(),
+        }
+    }
+}
+
+impl QueryFilter {
+    /// Create a new empty filter (includes all nodes).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Filter to only visible nodes.
+    pub fn visible(mut self) -> Self {
+        self.required_flags |= NodeFlags::VISIBLE;
+        self
+    }
+
+    /// Filter to only pickable nodes.
+    pub fn pickable(mut self) -> Self {
+        self.required_flags |= NodeFlags::PICKABLE;
+        self
+    }
+
+    /// Filter to only focusable nodes.
+    pub fn focusable(mut self) -> Self {
+        self.required_flags |= NodeFlags::FOCUSABLE;
+        self
+    }
+
+    /// Check if a node's flags satisfy this filter.
+    pub fn matches(&self, node_flags: NodeFlags) -> bool {
+        node_flags.contains(self.required_flags)
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -344,10 +380,7 @@ impl Tree {
             let Some(node) = self.nodes[id.idx()].as_ref() else {
                 continue;
             };
-            if filter.visible_only && !node.local.flags.contains(NodeFlags::VISIBLE) {
-                continue;
-            }
-            if filter.pickable_only && !node.local.flags.contains(NodeFlags::PICKABLE) {
+            if !filter.matches(node.local.flags) {
                 continue;
             }
             if let Some(clip) = node.local.local_clip {
@@ -389,10 +422,7 @@ impl Tree {
             let Some(node) = self.nodes[id.idx()].as_ref() else {
                 return false;
             };
-            if filter.visible_only && !node.local.flags.contains(NodeFlags::VISIBLE) {
-                return false;
-            }
-            true
+            filter.matches(node.local.flags)
         })
     }
 
@@ -588,10 +618,7 @@ mod tests {
         let hit = tree
             .hit_test_point(
                 Point::new(50.0, 50.0),
-                QueryFilter {
-                    visible_only: true,
-                    pickable_only: true,
-                },
+                QueryFilter::new().visible().pickable(),
             )
             .unwrap();
         assert_eq!(hit.node, b, "topmost by z should win");
@@ -735,10 +762,7 @@ mod tests {
         let hit1 = tree
             .hit_test_point(
                 Point::new(60.0, 60.0),
-                QueryFilter {
-                    visible_only: true,
-                    pickable_only: true,
-                },
+                QueryFilter::new().visible().pickable(),
             )
             .unwrap();
         let expected1 = if Tree::id_is_newer(b, a) { b } else { a };
@@ -761,10 +785,7 @@ mod tests {
         let hit2 = tree
             .hit_test_point(
                 Point::new(60.0, 60.0),
-                QueryFilter {
-                    visible_only: true,
-                    pickable_only: true,
-                },
+                QueryFilter::new().visible().pickable(),
             )
             .unwrap();
         assert_eq!(hit2.node, c, "newer id should win on equal z and depth");
@@ -830,10 +851,7 @@ mod tests {
         let hit = tree
             .hit_test_point(
                 Point::new(100.0, 100.0),
-                QueryFilter {
-                    visible_only: true,
-                    pickable_only: true,
-                },
+                QueryFilter::new().visible().pickable(),
             )
             .unwrap();
         assert_eq!(hit.node, grandchild);
@@ -874,10 +892,7 @@ mod tests {
         let hit = tree
             .hit_test_point(
                 Point::new(100.0, 100.0),
-                QueryFilter {
-                    visible_only: true,
-                    pickable_only: true,
-                },
+                QueryFilter::new().visible().pickable(),
             )
             .unwrap();
         let expected = if Tree::id_is_newer(b, a) { b } else { a };
@@ -909,10 +924,7 @@ mod tests {
         let hit_before = tree
             .hit_test_point(
                 Point::new(50.0, 50.0),
-                QueryFilter {
-                    visible_only: true,
-                    pickable_only: true,
-                },
+                QueryFilter::new().visible().pickable(),
             )
             .expect("expected initial hit at root");
         assert_eq!(hit_before.node, root);
@@ -926,10 +938,7 @@ mod tests {
         let hit_after = tree
             .hit_test_point(
                 Point::new(50.0, 50.0),
-                QueryFilter {
-                    visible_only: true,
-                    pickable_only: true,
-                },
+                QueryFilter::new().visible().pickable(),
             )
             .expect("expected hit after bounds update");
         assert_eq!(hit_after.node, n);
@@ -958,6 +967,115 @@ mod tests {
         assert_eq!(tree.parent_of(root), None);
         tree.remove(child);
         assert_eq!(tree.parent_of(child), None);
+    }
+
+    #[test]
+    fn query_filter_focusable_only() {
+        let mut tree = Tree::new();
+        let root = tree.insert(
+            None,
+            LocalNode {
+                local_bounds: Rect::new(0.0, 0.0, 200.0, 200.0),
+                flags: NodeFlags::VISIBLE | NodeFlags::PICKABLE,
+                ..Default::default()
+            },
+        );
+        let focusable_child = tree.insert(
+            Some(root),
+            LocalNode {
+                local_bounds: Rect::new(10.0, 10.0, 60.0, 60.0),
+                flags: NodeFlags::VISIBLE | NodeFlags::PICKABLE | NodeFlags::FOCUSABLE,
+                ..Default::default()
+            },
+        );
+        let non_focusable_child = tree.insert(
+            Some(root),
+            LocalNode {
+                local_bounds: Rect::new(70.0, 10.0, 120.0, 60.0),
+                flags: NodeFlags::VISIBLE | NodeFlags::PICKABLE,
+                ..Default::default()
+            },
+        );
+        let _ = tree.commit();
+
+        // Test hit_test_point with focusable_only filter
+        let hit_focusable = tree.hit_test_point(
+            Point::new(30.0, 30.0),
+            QueryFilter::new().visible().pickable().focusable(),
+        );
+        assert_eq!(hit_focusable.unwrap().node, focusable_child);
+
+        let hit_non_focusable = tree.hit_test_point(
+            Point::new(90.0, 30.0),
+            QueryFilter::new().visible().pickable().focusable(),
+        );
+        assert!(hit_non_focusable.is_none());
+
+        // Test intersect_rect with focusable_only filter
+        let focusable_intersections: Vec<NodeId> = tree
+            .intersect_rect(
+                Rect::new(0.0, 0.0, 200.0, 200.0),
+                QueryFilter::new().visible().pickable().focusable(),
+            )
+            .collect();
+        assert_eq!(focusable_intersections.len(), 1); // only focusable_child
+        assert!(!focusable_intersections.contains(&root));
+        assert!(focusable_intersections.contains(&focusable_child));
+        assert!(!focusable_intersections.contains(&non_focusable_child));
+    }
+
+    #[test]
+    fn query_filter_pickable_only_intersect_rect() {
+        let mut tree = Tree::new();
+        let root = tree.insert(
+            None,
+            LocalNode {
+                local_bounds: Rect::new(0.0, 0.0, 200.0, 200.0),
+                flags: NodeFlags::VISIBLE | NodeFlags::PICKABLE,
+                ..Default::default()
+            },
+        );
+        let pickable_child = tree.insert(
+            Some(root),
+            LocalNode {
+                local_bounds: Rect::new(10.0, 10.0, 60.0, 60.0),
+                flags: NodeFlags::VISIBLE | NodeFlags::PICKABLE,
+                ..Default::default()
+            },
+        );
+        let non_pickable_child = tree.insert(
+            Some(root),
+            LocalNode {
+                local_bounds: Rect::new(70.0, 10.0, 120.0, 60.0),
+                flags: NodeFlags::VISIBLE,
+                ..Default::default()
+            },
+        );
+        let _ = tree.commit();
+
+        // Test intersect_rect with pickable_only filter
+        let pickable_intersections: Vec<NodeId> = tree
+            .intersect_rect(
+                Rect::new(0.0, 0.0, 200.0, 200.0),
+                QueryFilter::new().visible().pickable(),
+            )
+            .collect();
+        assert_eq!(pickable_intersections.len(), 2); // root + pickable_child
+        assert!(pickable_intersections.contains(&root));
+        assert!(pickable_intersections.contains(&pickable_child));
+        assert!(!pickable_intersections.contains(&non_pickable_child));
+
+        // Test without pickable_only filter - should include all visible nodes
+        let all_visible_intersections: Vec<NodeId> = tree
+            .intersect_rect(
+                Rect::new(0.0, 0.0, 200.0, 200.0),
+                QueryFilter::new().visible(),
+            )
+            .collect();
+        assert_eq!(all_visible_intersections.len(), 3); // all nodes
+        assert!(all_visible_intersections.contains(&root));
+        assert!(all_visible_intersections.contains(&pickable_child));
+        assert!(all_visible_intersections.contains(&non_pickable_child));
     }
 
     #[test]
