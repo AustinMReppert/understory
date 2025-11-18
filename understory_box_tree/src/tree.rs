@@ -463,6 +463,108 @@ impl Tree {
             .and_then(|node| node.parent)
     }
 
+    /// Returns the flags of a node if the identifier is live.
+    pub fn flags(&self, id: NodeId) -> Option<NodeFlags> {
+        if !self.is_alive(id) {
+            return None;
+        }
+        self.nodes
+            .get(id.idx())
+            .and_then(|slot| slot.as_ref())
+            .map(|node| node.local.flags)
+    }
+
+    /// Get the next node in depth-first traversal order.
+    ///
+    /// Returns `None` if no next node exists or if the current node is stale.
+    /// This is a standard tree traversal that does not wrap around.
+    pub fn next_depth_first(&self, current: NodeId) -> Option<NodeId> {
+        if !self.is_alive(current) {
+            return None;
+        }
+
+        self.next_in_order(current)
+    }
+
+    /// Get the previous node in reverse depth-first traversal order.
+    ///
+    /// Returns `None` if no previous node exists or if the current node is stale.
+    /// This is a standard tree traversal that does not wrap around.
+    pub fn prev_depth_first(&self, current: NodeId) -> Option<NodeId> {
+        if !self.is_alive(current) {
+            return None;
+        }
+
+        self.prev_in_order(current)
+    }
+
+    /// Get the children of a node, or empty slice if node is stale.
+    pub fn children_of(&self, id: NodeId) -> &[NodeId] {
+        if !self.is_alive(id) {
+            return &[];
+        }
+        &self.node(id).children
+    }
+
+    fn next_in_order(&self, current: NodeId) -> Option<NodeId> {
+        let children = &self.node(current).children;
+        if let Some(&first_child) = children.first()
+            && self.is_alive(first_child)
+        {
+            return Some(first_child);
+        }
+
+        let mut node = current;
+        while let Some(parent) = self.parent_of(node) {
+            if let Some(next_sibling) = self.next_sibling(node) {
+                return Some(next_sibling);
+            }
+            node = parent;
+        }
+        None
+    }
+
+    fn prev_in_order(&self, current: NodeId) -> Option<NodeId> {
+        if let Some(prev_sibling) = self.prev_sibling(current) {
+            return self.last_in_subtree(&[prev_sibling]);
+        }
+
+        self.parent_of(current)
+    }
+
+    fn next_sibling(&self, node: NodeId) -> Option<NodeId> {
+        let parent = self.parent_of(node)?;
+        let siblings = &self.node(parent).children;
+        let pos = siblings.iter().position(|&id| id == node)?;
+        siblings.get(pos + 1).copied()
+    }
+
+    fn prev_sibling(&self, node: NodeId) -> Option<NodeId> {
+        let parent = self.parent_of(node)?;
+        let siblings = &self.node(parent).children;
+        let pos = siblings.iter().position(|&id| id == node)?;
+        if pos > 0 {
+            siblings.get(pos - 1).copied()
+        } else {
+            None
+        }
+    }
+
+    fn last_in_subtree(&self, nodes: &[NodeId]) -> Option<NodeId> {
+        if let Some(&node) = nodes.first()
+            && self.is_alive(node)
+        {
+            let children = &self.node(node).children;
+            if let Some(last_child) = children.last()
+                && self.is_alive(*last_child)
+            {
+                return self.last_in_subtree(&[*last_child]);
+            }
+            return Some(node);
+        }
+        None
+    }
+
     #[inline]
     fn id_is_newer(a: NodeId, b: NodeId) -> bool {
         (a.1 > b.1) || (a.1 == b.1 && a.0 > b.0)
@@ -1138,5 +1240,239 @@ mod tests {
         // Stale ids must not expose transforms or bounds.
         assert!(tree.world_transform(node).is_none());
         assert!(tree.world_bounds(node).is_none());
+    }
+
+    #[test]
+    fn depth_first_traversal() {
+        let mut tree = Tree::new();
+        // Build tree: root -> [a -> [c, d], b]
+        let root = tree.insert(
+            None,
+            LocalNode {
+                local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
+                ..Default::default()
+            },
+        );
+        let a = tree.insert(
+            Some(root),
+            LocalNode {
+                local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
+                ..Default::default()
+            },
+        );
+        let b = tree.insert(
+            Some(root),
+            LocalNode {
+                local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
+                ..Default::default()
+            },
+        );
+        let c = tree.insert(
+            Some(a),
+            LocalNode {
+                local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
+                ..Default::default()
+            },
+        );
+        let d = tree.insert(
+            Some(a),
+            LocalNode {
+                local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
+                ..Default::default()
+            },
+        );
+
+        // Depth-first order should be: root -> a -> c -> d -> b
+        let next_a = tree.next_depth_first(root).unwrap();
+        assert_eq!(next_a, a);
+
+        let next_c = tree.next_depth_first(a).unwrap();
+        assert_eq!(next_c, c);
+
+        let next_d = tree.next_depth_first(c).unwrap();
+        assert_eq!(next_d, d);
+
+        let next_b = tree.next_depth_first(d).unwrap();
+        assert_eq!(next_b, b);
+
+        // End of traversal
+        assert!(tree.next_depth_first(b).is_none());
+    }
+
+    #[test]
+    fn reverse_depth_first_traversal() {
+        let mut tree = Tree::new();
+        // Build tree: root -> [a -> [c, d], b]
+        let root = tree.insert(
+            None,
+            LocalNode {
+                local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
+                ..Default::default()
+            },
+        );
+        let a = tree.insert(
+            Some(root),
+            LocalNode {
+                local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
+                ..Default::default()
+            },
+        );
+        let b = tree.insert(
+            Some(root),
+            LocalNode {
+                local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
+                ..Default::default()
+            },
+        );
+        let c = tree.insert(
+            Some(a),
+            LocalNode {
+                local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
+                ..Default::default()
+            },
+        );
+        let d = tree.insert(
+            Some(a),
+            LocalNode {
+                local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
+                ..Default::default()
+            },
+        );
+
+        // Reverse depth-first order should be: b -> d -> c -> a -> root
+        let prev_d = tree.prev_depth_first(b).unwrap();
+        assert_eq!(prev_d, d);
+
+        let prev_c = tree.prev_depth_first(d).unwrap();
+        assert_eq!(prev_c, c);
+
+        let prev_a = tree.prev_depth_first(c).unwrap();
+        assert_eq!(prev_a, a);
+
+        let prev_root = tree.prev_depth_first(a).unwrap();
+        assert_eq!(prev_root, root);
+
+        // Beginning of traversal
+        assert!(tree.prev_depth_first(root).is_none());
+    }
+
+    #[test]
+    fn children_of_accessor() {
+        let mut tree = Tree::new();
+        let root = tree.insert(
+            None,
+            LocalNode {
+                local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
+                ..Default::default()
+            },
+        );
+        let a = tree.insert(
+            Some(root),
+            LocalNode {
+                local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
+                ..Default::default()
+            },
+        );
+        let b = tree.insert(
+            Some(root),
+            LocalNode {
+                local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
+                ..Default::default()
+            },
+        );
+
+        let children = tree.children_of(root);
+        assert_eq!(children.len(), 2);
+        assert_eq!(children[0], a);
+        assert_eq!(children[1], b);
+
+        assert!(tree.children_of(a).is_empty());
+        assert!(tree.children_of(b).is_empty());
+
+        tree.remove(a);
+        // Stale ids return empty slice
+        assert!(tree.children_of(a).is_empty());
+    }
+
+    #[test]
+    fn traversal_respects_liveness() {
+        let mut tree = Tree::new();
+        let root = tree.insert(
+            None,
+            LocalNode {
+                local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
+                ..Default::default()
+            },
+        );
+        let child = tree.insert(
+            Some(root),
+            LocalNode {
+                local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
+                ..Default::default()
+            },
+        );
+
+        assert!(tree.next_depth_first(root).is_some());
+        assert!(tree.prev_depth_first(child).is_some());
+
+        tree.remove(child);
+
+        // Stale ids return None for traversal
+        assert!(tree.next_depth_first(child).is_none());
+        assert!(tree.prev_depth_first(child).is_none());
+    }
+
+    #[test]
+    fn depth_changes_during_traversal() {
+        let mut tree = Tree::new();
+        // Build tree: root -> a -> b -> c
+        let root = tree.insert(
+            None,
+            LocalNode {
+                local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
+                ..Default::default()
+            },
+        );
+        let a = tree.insert(
+            Some(root),
+            LocalNode {
+                local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
+                ..Default::default()
+            },
+        );
+        let b = tree.insert(
+            Some(a),
+            LocalNode {
+                local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
+                ..Default::default()
+            },
+        );
+        let c = tree.insert(
+            Some(b),
+            LocalNode {
+                local_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
+                ..Default::default()
+            },
+        );
+
+        // Forward traversal
+        let next = tree.next_depth_first(root).unwrap();
+        assert_eq!(next, a);
+
+        let next = tree.next_depth_first(a).unwrap();
+        assert_eq!(next, b);
+
+        let next = tree.next_depth_first(b).unwrap();
+        assert_eq!(next, c);
+
+        // Reverse traversal
+        let prev = tree.prev_depth_first(c).unwrap();
+        assert_eq!(prev, b);
+
+        let prev = tree.prev_depth_first(b).unwrap();
+        assert_eq!(prev, a);
+
+        let prev = tree.prev_depth_first(a).unwrap();
+        assert_eq!(prev, root);
     }
 }
